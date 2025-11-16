@@ -1,0 +1,21 @@
+[package]
+name = "odus"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+toml = "0.8"  # Parsing TOML para odus.toml
+nix = { version = "0.29", features = ["process", "user", "fs"] }  # Abstrações seguras para syscalls Unix
+users = "0.11"  # Info de usuários e grupos
+anyhow = "1.0"  # Error handling simples
+rpassword = "7.4.0"
+pam = "0.7"  # Se autenticação via PAM for necessária
+pico-args = "0.5"
+
+
+[profile.release]
+opt-level = "z"  # Otimiza para tamanho (alternativa: "z" para ainda menor, mas mais lento em runtime)
+lto = true  # Ativa Link-Time Optimization para eliminar código morto entre crates
+codegen-units = 1  # Reduz unidades de codegen para permitir otimizações globais
+panic = "abort"  # Remove overhead de unwinding em panics, reduzindo bloat de runtime
+strip = true  # Desabilitado explicitamente (já default), mas confirme para evitar symbols
