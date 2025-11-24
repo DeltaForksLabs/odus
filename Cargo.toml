@@ -14,8 +14,11 @@ pico-args = "0.5"
 
 
 [profile.release]
-opt-level = "z"  # Otimiza para tamanho (alternativa: "z" para ainda menor, mas mais lento em runtime)
+opt-level = "s"  # Otimiza para tamanho (alternativa: "z" para ainda menor, mas mais lento em runtime)
 lto = true  # Ativa Link-Time Optimization para eliminar código morto entre crates
 codegen-units = 1  # Reduz unidades de codegen para permitir otimizações globais
 panic = "abort"  # Remove overhead de unwinding em panics, reduzindo bloat de runtime
 strip = true  # Desabilitado explicitamente (já default), mas confirme para evitar symbols
+split-debuginfo = "packed"  # generates a separate *.dwp/*.dSYM so the binary can get stripped
+incremental = true          # Improves re-compile times
+debug = "full"
