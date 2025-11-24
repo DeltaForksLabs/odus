@@ -4,7 +4,7 @@ use nix::sys::stat::{Mode, fchmod};
 use nix::unistd::{Gid, Uid, fchown};
 use pam::Authenticator;
 use rpassword;
-use std::fs::{File, OpenOptions, copy, create_dir_all};
+use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::{Read, Write as IoWrite, stdout};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
@@ -18,41 +18,53 @@ pub fn ensure_pam_service() -> Result<()> {
     let tmp_pam_path_odus = &format!("/etc/pam.d/{}", PAM_SERVICE_DEFAULT);
     let pam_path_odus = Path::new(tmp_pam_path_odus);
     if !pam_path_odus.exists() {
-        let pam_path_sudo = Path::new("/etc/pam.d/sudo");
-        if pam_path_sudo.exists() {
-            copy(pam_path_sudo, pam_path_odus).context("Falha ao copiar PAM de sudo")?;
-            configure_pam_file_permissions(pam_path_sudo)?;
-            println!(
-                "[*] PAM '{}' criado a partir de 'sudo'.",
-                PAM_SERVICE_DEFAULT
-            );
-        } else {
-            println!("[*] Criando arquivo PAM odus!");
-            const PAM_ODUS_CONTENT: &str = r#"
-#%PAM-1.0
+        println!("[*] Criando arquivo PAM odus!");
+        #[cfg(target_os = "linux")]
+        const PAM_ODUS_CONTENT: &str = r#"#%PAM-1.0
+# Configuração PAM para ODUS (Linux)
 
-# Set up user limits from /etc/security/limits.conf.
+# Define limites do usuário (arquivos abertos, memória, etc)
 session    required   pam_limits.so
 
+# Configura variáveis de ambiente (LANG, etc) - Exclusivo Linux
 session    required   pam_env.so readenv=1 user_readenv=0
 session    required   pam_env.so readenv=1 envfile=/etc/default/locale user_readenv=0
 
+# Inclui a pilha padrão do sistema (Melhor prática no Linux)
+# Isso garante integração com LDAP, Active Directory, Systemd, etc.
 @include common-auth
 @include common-account
 @include common-session-noninteractive
 "#;
-            let mut odus_file = File::create(pam_path_odus).with_context(|| {
-                format!("Falha ao criar o arquivo em {}", pam_path_odus.display())
+        #[cfg(target_os = "freebsd")]
+        const PAM_ODUS_CONTENT: &str = r#"# PAM configuration for ODUS (FreeBSD)        
+# Autenticação: Delega para a configuração do sistema
+# Isso garante que métodos como OPIE ou TACACS+ funcionem se configurados no host
+auth       include      system
+
+# Gerenciamento de conta (expiração, bloqueio)
+account    include      system
+
+# Sessão
+# pam_lastlog é problemático em serviços tipo sudo no FreeBSD,
+# então usamos pam_permit.so para satisfazer a exigência de sessão.
+session    required     pam_permit.so
+
+# Senha (caso seja necessário trocar, usa o sistema)
+password   include      system
+"#;
+        
+        let mut odus_file = File::create(pam_path_odus).with_context(|| {
+            format!("Falha ao criar o arquivo em {}", pam_path_odus.display())
+        })?;
+
+        odus_file
+            .write_all(PAM_ODUS_CONTENT.as_bytes())
+            .with_context(|| {
+                format!("Falha ao escrever conteúdo em {}", pam_path_odus.display())
             })?;
 
-            odus_file
-                .write_all(PAM_ODUS_CONTENT.as_bytes())
-                .with_context(|| {
-                    format!("Falha ao escrever conteúdo em {}", pam_path_odus.display())
-                })?;
-
-            configure_pam_file_permissions(pam_path_odus)?;
-        }
+        configure_pam_file_permissions(pam_path_odus)?;
     } else {
         let md = std::fs::metadata(pam_path_odus).context("Stat PAM")?;
         if md.uid() != 0 || md.gid() != 0 {
@@ -89,7 +101,7 @@ pub fn authenticate(cfg: &Value, rule: &Value) -> Result<()> {
             pam_handle
                 .get_handler()
                 .set_credentials(current_user.to_string_lossy(), password);
-            pam_handle.authenticate().context("Falha na autenticação")?;
+            pam_handle.authenticate().context("Falha na autentificação, senha incorreta!")?;
 
             update_cache(&cache_file)?;
         }
