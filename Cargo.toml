@@ -1,24 +1,32 @@
 [package]
-name = "odus"
-version = "0.1.1"
+name    = "odus"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-toml = "0.8"  # Parsing TOML para odus.toml
-nix = { version = "0.29", features = ["process", "user", "fs"] }  # Abstrações seguras para syscalls Unix
-users = "0.11"  # Info de usuários e grupos
-anyhow = "1.0"  # Error handling simples
+# Parsing do odus.toml
+toml = "0.8"
+# Syscalls Unix seguras (stat, fchmod, fchown, execvp, setuid, setgid...)
+nix = { version = "0.29", features = ["process", "user", "fs"] }
+# Informações de usuários e grupos (/etc/passwd, /etc/group)
+users = "0.11"
+# Error handling idiomático
+anyhow = "1.0"
+# Leitura de senha sem echo no terminal
 rpassword = "7.4.0"
-pam = "0.7"  # Se autenticação via PAM for necessária
+# Autenticação PAM
+pam = "0.7"
+# Parsing de argumentos leve
 pico-args = "0.5"
 
+# Chamadas C diretas para syslog (LOG_AUTHPRIV) — já transitiva via nix,
+# declarada explicitamente para uso direto no módulo audit.
+libc = "0.2"
 
 [profile.release]
-opt-level = "s"  # Otimiza para tamanho (alternativa: "z" para ainda menor, mas mais lento em runtime)
-lto = true  # Ativa Link-Time Optimization para eliminar código morto entre crates
-codegen-units = 1  # Reduz unidades de codegen para permitir otimizações globais
-panic = "abort"  # Remove overhead de unwinding em panics, reduzindo bloat de runtime
-strip = true  # Desabilitado explicitamente (já default), mas confirme para evitar symbols
-split-debuginfo = "packed"  # generates a separate *.dwp/*.dSYM so the binary can get stripped
-incremental = true          # Improves re-compile times
-debug = "full"
+opt-level     = "s"       # Otimiza para tamanho binário
+lto           = true      # Link-Time Optimization (elimina código morto entre crates)
+codegen-units = 1         # Uma única unidade: permite otimizações globais
+panic         = "abort"   # Sem overhead de unwinding — adequado para binário de sistema
+strip         = true      # Remove símbolos do binário final
+incremental   = false     # Compilações reproduzíveis (importante para binário setuid)
