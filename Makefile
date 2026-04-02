@@ -2,9 +2,76 @@
 #
 # Targets:
 #   make              → build release binary
-#   make install      → build + install to $(DESTDIR)/usr/local/bin with correct ownership
+#   make install      → build + install with correct ownership and setuid bit
 #   make uninstall    → remove installed binary
 #   make clean        → remove build artifacts
+#   make check        → cargo audit + clippy
+#
+# Override cargo path if needed:
+#   CARGO=/path/to/cargo make
+
+# ─── Cargo / rustup detection ────────────────────────────────────────────────
+# Three problems solved here:
+#
+# 1. make runs /bin/sh with a minimal PATH — ~/.cargo/bin is not included.
+# 2. Under 'sudo', HOME becomes /root, hiding the real user's ~/.cargo.
+# 3. cargo may exist as a rustup shim with no default toolchain configured,
+#    causing "rustup could not choose a version of cargo to run".
+#
+# CARGO can be overridden on the command line: CARGO=/path/to/cargo make
+
+ifeq ($(origin CARGO),undefined)
+
+# Identify the invoking user regardless of whether sudo was used
+_WHOAMI     := $(or $(SUDO_USER),$(LOGNAME),$(USER))
+# Read home from passwd — reliable even under sudo (HOME may be /root)
+_REAL_HOME  := $(shell getent passwd "$(_WHOAMI)" 2>/dev/null | cut -d: -f6)
+_RUSTUP_BIN := $(_REAL_HOME)/.cargo/bin
+
+CARGO := $(shell \
+	{ [ -x "$(_RUSTUP_BIN)/cargo" ] && echo "$(_RUSTUP_BIN)/cargo"; } \
+	|| command -v cargo 2>/dev/null \
+	|| { [ -x "/usr/local/bin/cargo" ] && echo "/usr/local/bin/cargo"; } \
+	|| { [ -x "/usr/bin/cargo" ] && echo "/usr/bin/cargo"; })
+
+ifeq ($(CARGO),)
+$(error cargo not found for user '$(_WHOAMI)' (home: $(_REAL_HOME)). \
+Install Rust via https://rustup.rs or run: CARGO=/path/to/cargo make)
+endif
+
+endif # CARGO override
+
+# Diretório real onde estão cargo/rustc/rustup
+CARGO_BIN_DIR := $(patsubst %/,%,$(dir $(CARGO)))
+
+# Garante que o cargo consiga encontrar rustc/rustdoc/rustup,
+# mesmo quando o make ou o sudo usam um PATH mínimo.
+export PATH := $(CARGO_BIN_DIR):$(PATH)
+
+# Mantém rustup/cargo apontando para a instalação do usuário real,
+# inclusive quando o make for executado com sudo.
+ifneq ($(_REAL_HOME),)
+export CARGO_HOME := $(_REAL_HOME)/.cargo
+export RUSTUP_HOME := $(_REAL_HOME)/.rustup
+endif
+
+# Localiza o rustup ao lado do cargo
+_RUSTUP := $(CARGO_BIN_DIR)/rustup
+
+# ─── Toolchain check ─────────────────────────────────────────────────────────
+# If rustup is present but no default toolchain is set, install stable now.
+# This runs once at Makefile parse time and is a no-op if stable is already set.
+_TOOLCHAIN_OK := $(shell \
+	if [ -x "$(_RUSTUP)" ]; then \
+		"$(_RUSTUP)" show active-toolchain >/dev/null 2>&1 && echo "ok"; \
+	else \
+		echo "ok"; \
+	fi)
+
+ifneq ($(_TOOLCHAIN_OK),ok)
+$(info [*] No default rustup toolchain found. Installing stable...)
+$(shell "$(_RUSTUP)" default stable >/dev/tty 2>&1)
+endif
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -12,49 +79,34 @@ BINARY      := odus
 INSTALL_DIR := $(DESTDIR)/usr/local/bin
 TARGET      := target/release/$(BINARY)
 
-# Detect OS for platform-specific messages
-UNAME := $(shell uname -s)
-
 # ─── Phony targets ───────────────────────────────────────────────────────────
 
 .PHONY: all build install uninstall clean check
-
-# ─── Default ─────────────────────────────────────────────────────────────────
 
 all: build
 
 # ─── Build ───────────────────────────────────────────────────────────────────
 
 build:
+	@echo "[*] Using cargo: $(CARGO)"
 	@echo "[*] Building $(BINARY) (release)..."
-	cargo build --release
+	"$(CARGO)" build --release
 	@echo "[✓] Binary ready at $(TARGET)"
 
 # ─── Install ─────────────────────────────────────────────────────────────────
 
 install: build
-	@# Require root for chown and setuid
 	@if [ "$$(id -u)" -ne 0 ]; then \
 		echo "[!] Installation requires root. Run: sudo make install"; \
 		exit 1; \
 	fi
-
 	@echo "[*] Installing $(BINARY) to $(INSTALL_DIR)..."
-	install -d $(INSTALL_DIR)
-
-	@# Copy binary (strips setuid temporarily during copy)
-	install -m 0755 $(TARGET) $(INSTALL_DIR)/$(BINARY)
-
-	@# Set root ownership
-	chown root:root $(INSTALL_DIR)/$(BINARY)
-
-	@# Activate setuid bit — required for privilege escalation
-	chmod u+s $(INSTALL_DIR)/$(BINARY)
-
+	install -d "$(INSTALL_DIR)"
+	install -m 0755 "$(TARGET)" "$(INSTALL_DIR)/$(BINARY)"
+	chown root:root "$(INSTALL_DIR)/$(BINARY)"
+	chmod u+s "$(INSTALL_DIR)/$(BINARY)"
 	@echo "[✓] Installed: $(INSTALL_DIR)/$(BINARY)"
-	@ls -la $(INSTALL_DIR)/$(BINARY)
-
-	@# Warn if /etc/odus.toml is missing (odus will create it on first run)
+	@ls -lha "$(INSTALL_DIR)/$(BINARY)"
 	@if [ ! -f /etc/odus.toml ]; then \
 		echo "[i] /etc/odus.toml not found — odus will create a default on first run."; \
 	fi
@@ -66,9 +118,8 @@ uninstall:
 		echo "[!] Uninstall requires root. Run: sudo make uninstall"; \
 		exit 1; \
 	fi
-
-	@if [ -f $(INSTALL_DIR)/$(BINARY) ]; then \
-		rm -f $(INSTALL_DIR)/$(BINARY); \
+	@if [ -f "$(INSTALL_DIR)/$(BINARY)" ]; then \
+		rm -f "$(INSTALL_DIR)/$(BINARY)"; \
 		echo "[✓] Removed $(INSTALL_DIR)/$(BINARY)"; \
 	else \
 		echo "[i] $(INSTALL_DIR)/$(BINARY) not found, nothing to remove."; \
@@ -78,13 +129,13 @@ uninstall:
 
 clean:
 	@echo "[*] Cleaning build artifacts..."
-	cargo clean
+	"$(CARGO)" clean
 	@echo "[✓] Done."
 
 # ─── Check ───────────────────────────────────────────────────────────────────
 
 check:
 	@echo "[*] Running cargo audit..."
-	cargo audit
+	"$(CARGO)" audit
 	@echo "[*] Running clippy..."
-	cargo clippy -- -D warnings
+	"$(CARGO)" clippy -- -D warnings
