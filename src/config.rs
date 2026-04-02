@@ -8,13 +8,13 @@
 //   A4:    Path is a compile-time constant — not user-supplied
 
 use anyhow::{Context, Result};
-use nix::sys::stat::{fchmod, lstat, Mode, SFlag};
-use nix::unistd::{fchown, Gid, Uid};
+use nix::sys::stat::{Mode, SFlag, fchmod, lstat};
+use nix::unistd::{Gid, Uid, fchown};
+use std::fs::OpenOptions;
 use std::io::Write as IoWrite;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::fs::OpenOptions;
 
 /// Fixed configuration path — not configurable by unprivileged users (fix C1/A4).
 pub const CONFIG_PATH: &str = "/etc/odus.toml";
@@ -42,9 +42,7 @@ pub fn ensure_default_and_perms() -> Result<()> {
 pub fn load() -> Result<toml::Value> {
     let config_str =
         std::fs::read_to_string(config_path()).context("Failed to read /etc/odus.toml")?;
-    config_str
-        .parse::<toml::Value>()
-        .context("Failed to parse /etc/odus.toml as TOML")
+    toml::from_str(&config_str).context("Failed to parse /etc/odus.toml as TOML")
 }
 
 // ─── Private ────────────────────────────────────────────────────────────────
@@ -55,7 +53,7 @@ pub fn load() -> Result<toml::Value> {
 //              access to certain system commands (shutdown, reboot, etc.) and
 //              is a standard group since 4.2BSD.
 #[cfg(target_os = "freebsd")]
-const DEFAULT_CONFIG: &str = r#"# odus.toml — Privilege escalation configuration
+const DEFAULT_CONFIG: &str = r#"# odus.toml - Privilege escalation configuration
 # Owner: root:root   Permissions: 0600
 # Do NOT change ownership or permissions.
 
@@ -80,7 +78,7 @@ nopasswd = false
 "#;
 
 #[cfg(not(target_os = "freebsd"))]
-const DEFAULT_CONFIG: &str = r#"# odus.toml — Privilege escalation configuration
+const DEFAULT_CONFIG: &str = r#"# odus.toml - Privilege escalation configuration
 # Owner: root:root   Permissions: 0600
 # Do NOT change ownership or permissions.
 
@@ -114,8 +112,12 @@ fn create_if_missing(config_path: &Path) -> Result<()> {
 
             // Set owner and permissions on the open fd — never re-open by path.
             // fchmod/fchown in nix 0.29 accept any AsFd, so &file works directly.
-            fchown(file.as_raw_fd(), Some(Uid::from_raw(0)), Some(Gid::from_raw(0)))
-                .context("Failed to set root ownership on config")?;
+            fchown(
+                file.as_raw_fd(),
+                Some(Uid::from_raw(0)),
+                Some(Gid::from_raw(0)),
+            )
+            .context("Failed to set root ownership on config")?;
             fchmod(file.as_raw_fd(), CONFIG_MODE)
                 .context("Failed to set 0600 permissions on config")?;
 
