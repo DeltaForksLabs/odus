@@ -15,7 +15,7 @@
 
 use crate::security;
 use anyhow::{Context, Result};
-use nix::sys::stat::{SFlag, fchmod, lstat, Mode};
+use nix::sys::stat::{Mode, SFlag, fchmod, lstat};
 use nix::unistd::{Gid, Uid, fchown};
 use pam::Authenticator;
 use std::fs::{File, OpenOptions, create_dir_all};
@@ -64,7 +64,7 @@ pub fn ensure_pam_service() -> Result<()> {
 
     match OpenOptions::new()
         .write(true)
-        .create_new(true)               // O_CREAT | O_EXCL — atomic
+        .create_new(true) // O_CREAT | O_EXCL — atomic
         .custom_flags(libc::O_NOFOLLOW) // reject symlinks on the final component
         .open(&pam_path)
     {
@@ -73,8 +73,12 @@ pub fn ensure_pam_service() -> Result<()> {
                 .context("Failed to write PAM service file")?;
 
             // fchmod/fchown via AsFd — no as_raw_fd(), no path re-open.
-            fchown(file.as_raw_fd(), Some(Uid::from_raw(0)), Some(Gid::from_raw(0)))
-                .context("Failed to set root ownership on PAM file")?;
+            fchown(
+                file.as_raw_fd(),
+                Some(Uid::from_raw(0)),
+                Some(Gid::from_raw(0)),
+            )
+            .context("Failed to set root ownership on PAM file")?;
             fchmod(file.as_raw_fd(), Mode::from_bits_truncate(0o644))
                 .context("Failed to set 0644 permissions on PAM file")?;
 
@@ -82,9 +86,7 @@ pub fn ensure_pam_service() -> Result<()> {
             Ok(())
         }
 
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            verify_pam_integrity(&pam_path)
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => verify_pam_integrity(&pam_path),
 
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
             crate::audit::log_security(&format!(
@@ -115,7 +117,16 @@ pub fn authenticate(cfg: &Value, rule: &Value, command: &[String]) -> Result<()>
     let cache_timeout_min = cfg
         .get("cache_timeout")
         .and_then(|v| v.as_integer())
-        .unwrap_or(15) as u64;
+        .unwrap_or(15)
+        .clamp(0, 60) as u64;
+
+    // Configurable retry limit (mirrors sudo passwd_tries). Clamped to 1..=10
+    // so a misconfigured value cannot produce zero attempts or an open-ended loop.
+    let max_tries = cfg
+        .get("max_tries")
+        .and_then(|v| v.as_integer())
+        .unwrap_or(3)
+        .clamp(1, 10) as u32;
 
     let current_user = users::get_current_username().unwrap_or_default();
     let username = current_user.to_string_lossy();
@@ -137,29 +148,40 @@ pub fn authenticate(cfg: &Value, rule: &Value, command: &[String]) -> Result<()>
             Ok(())
         }
         true => {
-            eprint!("[odus] password for {username}: ");
-            stdout().flush().ok();
+            let mut last_err = anyhow::anyhow!("Authentication failed");
 
-            let raw = rpassword::read_password().context("Failed to read password")?;
-            // Wrap immediately — zeroed on drop regardless of what happens next.
-            let password = SensitiveString(raw);
+            for attempt in 1..=max_tries {
+                eprint!("[odus] password for {username}: ");
+                stdout().flush().ok();
 
-            match do_pam_auth(&username, &password.0) {
-                Ok(()) => {
-                    crate::audit::log_auth_ok(&username);
-                    crate::audit::log_exec(&username, command);
-                    // password is dropped (and zeroed) here before update_cache.
-                    drop(password);
-                    update_cache(&cache_file)
-                }
-                Err(e) => {
-                    crate::audit::log_auth_fail(&username, &e.to_string());
-                    eprintln!("odus: authentication failed.");
-                    // password is dropped (and zeroed) here before returning.
-                    drop(password);
-                    Err(e)
+                let raw = rpassword::read_password().context("Failed to read password")?;
+                // Wrap immediately — zeroed on drop regardless of what happens next.
+                let password = SensitiveString(raw);
+
+                match do_pam_auth(&username, &password.0) {
+                    Ok(()) => {
+                        crate::audit::log_auth_ok(&username);
+                        crate::audit::log_exec(&username, command);
+                        drop(password);
+                        return update_cache(&cache_file);
+                    }
+                    Err(e) => {
+                        crate::audit::log_auth_fail(&username, &e.to_string());
+                        drop(password);
+                        last_err = e;
+                        if attempt < max_tries {
+                            eprintln!("Sorry, try again.");
+                        }
+                    }
                 }
             }
+
+            // All attempts exhausted — mirrors sudo output format
+            eprintln!(
+                "odus: {max_tries} incorrect password attempt{}",
+                if max_tries == 1 { "" } else { "s" }
+            );
+            Err(last_err)
         }
     }
 }
@@ -204,14 +226,18 @@ pub fn update_cache(cache_file: &Path) -> Result<()> {
         .write(true)
         .create(true)
         .truncate(true)
-        .mode(0o600)                    // explicit — do not rely on umask
+        .mode(0o600) // explicit — do not rely on umask
         .custom_flags(libc::O_NOFOLLOW) // reject symlinks
         .open(cache_file)
         .context("Failed to open cache file for writing")?;
 
     // Defence in depth: confirm owner and permissions on the open fd.
-    fchown(file.as_raw_fd(), Some(Uid::from_raw(0)), Some(Gid::from_raw(0)))
-        .context("Failed to set root ownership on cache file")?;
+    fchown(
+        file.as_raw_fd(),
+        Some(Uid::from_raw(0)),
+        Some(Gid::from_raw(0)),
+    )
+    .context("Failed to set root ownership on cache file")?;
     fchmod(file.as_raw_fd(), Mode::from_bits_truncate(0o600))
         .context("Failed to set 0600 permissions on cache file")?;
 
@@ -223,8 +249,7 @@ pub fn update_cache(cache_file: &Path) -> Result<()> {
 // ─── Private ────────────────────────────────────────────────────────────────
 
 fn do_pam_auth(username: &str, password: &str) -> Result<()> {
-    let mut pam =
-        Authenticator::with_password(PAM_SERVICE).context("Failed to initialise PAM")?;
+    let mut pam = Authenticator::with_password(PAM_SERVICE).context("Failed to initialise PAM")?;
     pam.get_handler().set_credentials(username, password);
     pam.authenticate()
         .context("PAM authentication failed — incorrect password")
@@ -255,8 +280,7 @@ fn ensure_cache_dir(cache_dir: &Path) -> Result<()> {
     // Open the directory as a file descriptor, then call fchmod on it.
     // nix does not expose chmod-by-path; the correct API is fchmod on an open fd.
     if stat.st_mode & 0o077 != 0 {
-        let dir_fd = File::open(cache_dir)
-            .context("Failed to open cache directory for fchmod")?;
+        let dir_fd = File::open(cache_dir).context("Failed to open cache directory for fchmod")?;
         fchmod(dir_fd.as_raw_fd(), Mode::from_bits_truncate(0o700))
             .context("Failed to fix cache directory permissions")?;
     }

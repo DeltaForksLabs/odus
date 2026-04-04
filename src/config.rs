@@ -60,6 +60,9 @@ const DEFAULT_CONFIG: &str = r#"# odus.toml - Privilege escalation configuration
 # Authentication cache timeout in minutes (0 = always prompt)
 cache_timeout = 15
 
+# Maximum password attempts before odus exits (mirrors sudo passwd_tries)
+max_tries = 3
+
 # Trusted directories for relative command resolution
 secure_path = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin"]
 
@@ -84,6 +87,9 @@ const DEFAULT_CONFIG: &str = r#"# odus.toml - Privilege escalation configuration
 
 # Authentication cache timeout in minutes (0 = always prompt)
 cache_timeout = 15
+
+# Maximum password attempts before odus exits (mirrors sudo passwd_tries)
+max_tries = 3
 
 # Trusted directories for relative command resolution
 secure_path = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin"]
