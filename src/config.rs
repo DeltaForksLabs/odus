@@ -68,6 +68,7 @@ secure_path = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/usr
 
 # Allow members of 'wheel' to run any command
 [[rules]]
+# user     = ""
 group    = "wheel"
 cmd      = "ALL"
 nopasswd = false
@@ -75,12 +76,13 @@ nopasswd = false
 # Allow members of 'operator' to run any command
 # 'operator' is a traditional FreeBSD group (gid 5) for privileged system users
 [[rules]]
+# user     = ""
 group    = "operator"
 cmd      = "ALL"
 nopasswd = false
 "#;
 
-#[cfg(not(target_os = "freebsd"))]
+#[cfg(target_os = "linux")]
 const DEFAULT_CONFIG: &str = r#"# odus.toml - Privilege escalation configuration
 # Owner: root:root   Permissions: 0600
 # Do NOT change ownership or permissions.
@@ -96,7 +98,8 @@ secure_path = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/usr
 
 # Allow members of 'wheel' to run any command
 [[rules]]
-group    = "wheel"
+# user     = ""
+group    = "sudo"
 cmd      = "ALL"
 nopasswd = false
 "#;
