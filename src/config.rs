@@ -42,6 +42,9 @@ pub fn ensure_default_and_perms() -> Result<()> {
 pub fn load() -> Result<toml::Value> {
     let config_str =
         std::fs::read_to_string(config_path()).context("Failed to read /etc/odus.toml")?;
+    // toml::from_str parses a full TOML document (comments, sections, etc).
+    // .parse::<toml::Value>() uses Value::from_str which expects a bare TOML
+    // value (string, 42, [...]) and rejects comments with 'unexpected content'.
     toml::from_str(&config_str).context("Failed to parse /etc/odus.toml as TOML")
 }
 
@@ -57,7 +60,10 @@ const DEFAULT_CONFIG: &str = r#"# odus.toml - Privilege escalation configuration
 # Owner: root:root   Permissions: 0600
 # Do NOT change ownership or permissions.
 
-# Authentication cache timeout in minutes (0 = always prompt)
+# Authentication cache timeout:
+#   -1 = once per session (prompt once, valid until terminal closes)
+#    0 = always prompt
+# 1-60 = cache valid for N minutes
 cache_timeout = 15
 
 # Maximum password attempts before odus exits (mirrors sudo passwd_tries)
@@ -87,7 +93,10 @@ const DEFAULT_CONFIG: &str = r#"# odus.toml - Privilege escalation configuration
 # Owner: root:root   Permissions: 0600
 # Do NOT change ownership or permissions.
 
-# Authentication cache timeout in minutes (0 = always prompt)
+# Authentication cache timeout:
+#   -1 = once per session (prompt once, valid until terminal closes)
+#    0 = always prompt
+# 1-60 = cache valid for N minutes
 cache_timeout = 15
 
 # Maximum password attempts before odus exits (mirrors sudo passwd_tries)
@@ -96,7 +105,7 @@ max_tries = 3
 # Trusted directories for relative command resolution
 secure_path = ["/usr/bin", "/bin", "/usr/sbin", "/sbin", "/usr/local/bin", "/usr/local/sbin"]
 
-# Allow members of 'wheel' to run any command
+# Allow members of 'sudo' to run any command
 [[rules]]
 # user     = ""
 group    = "sudo"

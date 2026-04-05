@@ -16,8 +16,8 @@
 use crate::security;
 use anyhow::{Context, Result};
 use nix::sys::stat::{Mode, SFlag, fchmod, lstat};
-use nix::unistd::{Gid, Uid, fchown};
-use pam::Authenticator;
+use nix::unistd::{Gid, Uid, fchown, getsid};
+use pam::{Authenticator};
 use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::{Read, Write as IoWrite, stdout};
 use std::os::fd::AsRawFd;
@@ -114,11 +114,16 @@ pub fn authenticate(cfg: &Value, rule: &Value, command: &[String]) -> Result<()>
         .and_then(|m| m.get("nopasswd").and_then(|v| v.as_bool()))
         .unwrap_or(false);
 
-    let cache_timeout_min = cfg
+    // cache_timeout semantics:
+    //   -1 : authenticate once per TTY session (cache never expires by time)
+    //    0 : always prompt (no caching)
+    //  1-60: cache valid for N minutes (clamped to this range)
+    let cache_timeout_raw = cfg
         .get("cache_timeout")
         .and_then(|v| v.as_integer())
-        .unwrap_or(15)
-        .clamp(0, 60) as u64;
+        .unwrap_or(15);
+
+    let cache_mode = CacheMode::from_config(cache_timeout_raw);
 
     // Configurable retry limit (mirrors sudo passwd_tries). Clamped to 1..=10
     // so a misconfigured value cannot produce zero attempts or an open-ended loop.
@@ -134,23 +139,28 @@ pub fn authenticate(cfg: &Value, rule: &Value, command: &[String]) -> Result<()>
     let cache_dir = Path::new("/var/run/odus/ts");
     ensure_cache_dir(cache_dir)?;
 
-    let cache_file = cache_dir.join(username.as_ref());
+    // Cache file includes the Session ID so each login session gets its own file.
+    // When a session ends its SID is never reused, so the old cache is naturally
+    // invalidated — this is the mechanism behind cache_timeout = -1.
+    let sid = getsid(None).unwrap_or(nix::unistd::Pid::from_raw(0));
+    let cache_name = format!("{username}_{sid}");
+    let cache_file = cache_dir.join(&cache_name);
 
     if nopasswd {
         crate::audit::log_exec(&username, command);
         return Ok(());
     }
 
-    match needs_auth(&cache_file, cache_timeout_min)? {
+    match needs_auth(&cache_file, &cache_mode)? {
         false => {
             crate::audit::log_cache_hit(&username);
             crate::audit::log_exec(&username, command);
             Ok(())
         }
         true => {
-            let mut last_err = anyhow::anyhow!("Authentication failed");
+            let mut attempts_left = max_tries;
 
-            for attempt in 1..=max_tries {
+            loop {
                 eprint!("[odus] password for {username}: ");
                 stdout().flush().ok();
 
@@ -166,28 +176,58 @@ pub fn authenticate(cfg: &Value, rule: &Value, command: &[String]) -> Result<()>
                         return update_cache(&cache_file);
                     }
                     Err(e) => {
+                        // Log the real PAM error to syslog for the admin.
+                        // Do NOT surface PAM internals (error codes) to the user —
+                        // they provide no value to a legitimate user but may aid an attacker.
                         crate::audit::log_auth_fail(&username, &e.to_string());
                         drop(password);
-                        last_err = e;
-                        if attempt < max_tries {
+                        attempts_left -= 1;
+
+                        if attempts_left > 0 {
                             eprintln!("Sorry, try again.");
+                        } else {
+                            // All attempts exhausted — mirrors sudo output format
+                            eprintln!(
+                                "\x1b[31modus: {max_tries} incorrect password attempt{}\x1b[0m",
+                                if max_tries == 1 { "" } else { "s" }
+                            );
+                            // Return a generic error — PAM details stay in syslog only
+                            return Err(anyhow::anyhow!("\x1b[31mAuthentication failed\x1b[0m"));
                         }
                     }
                 }
             }
+        }
+    }
+}
 
-            // All attempts exhausted — mirrors sudo output format
-            eprintln!(
-                "odus: {max_tries} incorrect password attempt{}",
-                if max_tries == 1 { "" } else { "s" }
-            );
-            Err(last_err)
+/// How the authentication cache behaves, derived from the cache_timeout config value.
+pub enum CacheMode {
+    /// Always prompt — no caching (cache_timeout = 0).
+    AlwaysPrompt,
+    /// Cache valid for N minutes (cache_timeout = 1..=60).
+    Timed(u64),
+    /// Cache valid for the entire TTY session (cache_timeout = -1).
+    Session,
+}
+
+impl CacheMode {
+    pub fn from_config(raw: i64) -> Self {
+        match raw {
+            -1 => CacheMode::Session,
+            0 => CacheMode::AlwaysPrompt,
+            n => CacheMode::Timed(n.clamp(1, 60) as u64),
         }
     }
 }
 
 /// Returns `true` if PAM authentication is required, `false` if the cache is valid.
-pub fn needs_auth(cache_file: &Path, cache_timeout_min: u64) -> Result<bool> {
+pub fn needs_auth(cache_file: &Path, mode: &CacheMode) -> Result<bool> {
+    // AlwaysPrompt: skip cache entirely — always require authentication.
+    if matches!(mode, CacheMode::AlwaysPrompt) {
+        return Ok(true);
+    }
+
     match security::open_and_verify_cache(cache_file)? {
         None => Ok(true),
         Some(mut file) => {
@@ -199,13 +239,23 @@ pub fn needs_auth(cache_file: &Path, cache_timeout_min: u64) -> Result<bool> {
                 return Ok(true); // corrupted cache → re-authenticate
             };
 
-            let cached = SystemTime::UNIX_EPOCH + Duration::from_secs(ts);
-            let timeout = Duration::from_secs(cache_timeout_min * 60);
-            let elapsed = SystemTime::now()
-                .duration_since(cached)
-                .unwrap_or(Duration::MAX);
+            match mode {
+                // Session mode: any valid (root-owned) cache file for this SID
+                // means the user already authenticated in this session.
+                CacheMode::Session => Ok(false),
 
-            Ok(elapsed >= timeout)
+                // Timed mode: check whether the cached timestamp is still fresh.
+                CacheMode::Timed(minutes) => {
+                    let cached = SystemTime::UNIX_EPOCH + Duration::from_secs(ts);
+                    let timeout = Duration::from_secs(minutes * 60);
+                    let elapsed = SystemTime::now()
+                        .duration_since(cached)
+                        .unwrap_or(Duration::MAX);
+                    Ok(elapsed >= timeout)
+                }
+
+                CacheMode::AlwaysPrompt => unreachable!(),
+            }
         }
     }
 }
