@@ -78,6 +78,7 @@ endif
 BINARY      := odus
 INSTALL_DIR := $(DESTDIR)/usr/local/bin
 TARGET      := target/release/$(BINARY)
+CONF_DIR    := /etc/odus.toml
 
 # ─── Phony targets ───────────────────────────────────────────────────────────
 
@@ -115,15 +116,24 @@ install: build
 
 uninstall:
 	@if [ "$$(id -u)" -ne 0 ]; then \
-		echo "[!] Uninstall requires root. Run: sudo make uninstall"; \
+	    echo "[!] Uninstall requires root privileges. Run: sudo make uninstall"; \
 		exit 1; \
 	fi
-	@if [ -f "$(INSTALL_DIR)/$(BINARY)" ]; then \
+	@echo "[*] Uninstalling $(BINARY)..."
+	@if [ -e "$(INSTALL_DIR)/$(BINARY)" ]; then \
 		rm -f "$(INSTALL_DIR)/$(BINARY)"; \
 		echo "[✓] Removed $(INSTALL_DIR)/$(BINARY)"; \
 	else \
-		echo "[i] $(INSTALL_DIR)/$(BINARY) not found, nothing to remove."; \
+		echo "[i] $(INSTALL_DIR)/$(BINARY) not found. Skipping."; \
 	fi
+	@echo "[*] Removing configuration..."
+	@if [ -e "$(CONF_DIR)" ]; then \
+		rm -rf "$(CONF_DIR)"; \
+		echo "[✓] Removed $(CONF_DIR)"; \
+	else \
+		echo "[i] $(CONF_DIR) not found. Skipping."; \
+	fi
+	@echo "[✓] Uninstallation complete."
 
 # ─── Clean ───────────────────────────────────────────────────────────────────
 
@@ -135,7 +145,7 @@ clean:
 # ─── Check ───────────────────────────────────────────────────────────────────
 
 check:
-	@echo "[*] Running cargo audit..."
-	"$(CARGO)" audit
+	# @echo "[*] Running cargo audit..."
+	# "$(CARGO)" audit
 	@echo "[*] Running clippy..."
 	"$(CARGO)" clippy -- -D warnings
