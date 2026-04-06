@@ -8,7 +8,7 @@
 //         the caller's untrusted PATH
 
 use anyhow::{Context, Result};
-use nix::unistd::{Gid, Uid, execvp, setgid, setuid};
+use nix::unistd::{Gid, Uid, execve, setgid, setgroups, setuid};
 use std::ffi::CString;
 use std::path::Path;
 use toml::Value;
@@ -26,12 +26,31 @@ pub fn run_as_root(command: &[String], cfg: &Value) -> Result<()> {
     // unsafe in Rust 2024 because it is not thread-safe (concurrent reads from
     // other threads could observe a partially written env). There are no other
     // threads in this process at this point, so the operation is safe.
-    unsafe {
-        std::env::set_var("PATH", secure_paths.join(":"));
+
+    // Keep the original TERM if it exists and does not contain NUL; otherwise, omit it
+    let term_entry = std::env::var("TERM")
+        .ok()
+        .and_then(|t| CString::new(format!("TERM={t}")).ok());
+
+    let path_form = format!("PATH={}", secure_paths.join(":"));
+    // Create a clean and safe environment
+    let mut clean_environment: Vec<CString> = vec![
+        CString::new(path_form).context("[!] secure_path contains a NULL byte!")?,
+        CString::new("USER=root").unwrap(),
+        CString::new("HOME=/root").unwrap(),
+        CString::new("LOGNAME=root").unwrap(),
+        CString::new("SHELL=/bin/sh").unwrap(),
+    ]
+    .into_iter()
+    .collect();
+
+    if let Some(term) = term_entry {
+        clean_environment.push(term);
     }
 
     // setgid must precede setuid: after setuid(0) the process becomes root and
     // can always call setgid again, but the reverse ordering is safer practice.
+    setgroups(&[Gid::from_raw(0)]).context("setgroups to root failed")?;
     setgid(Gid::from_raw(0)).context("setgid to root failed")?;
     setuid(Uid::from_raw(0)).context("setuid to root failed")?;
 
@@ -48,9 +67,9 @@ pub fn run_as_root(command: &[String], cfg: &Value) -> Result<()> {
         })
         .collect::<Result<Vec<_>>>()?;
 
-    match execvp(&cstr_args[0], &cstr_args) {
-        Ok(_) => unreachable!("execvp does not return on success"),
-        Err(e) => Err(anyhow::anyhow!(e).context(format!("execvp failed for '{abs_cmd}'"))),
+    match execve(&cstr_args[0], &cstr_args, &clean_environment) {
+        Ok(_) => unreachable!("execve does not return on success"),
+        Err(e) => Err(anyhow::anyhow!(e).context(format!("execve failed for '{abs_cmd}'"))),
     }
 }
 
