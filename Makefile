@@ -122,14 +122,14 @@ uninstall:
 	@echo "[*] Uninstalling $(BINARY)..."
 	@if [ -e "$(INSTALL_DIR)/$(BINARY)" ]; then \
 		rm -f "$(INSTALL_DIR)/$(BINARY)"; \
-		echo "[✓] Removed $(INSTALL_DIR)/$(BINARY)"; \
+		echo " ✓  Removed $(INSTALL_DIR)/$(BINARY)"; \
 	else \
 		echo "[i] $(INSTALL_DIR)/$(BINARY) not found. Skipping."; \
 	fi
 	@echo "[*] Removing configuration..."
 	@if [ -e "$(CONF_DIR)" ]; then \
 		rm -rf "$(CONF_DIR)"; \
-		echo "[✓] Removed $(CONF_DIR)"; \
+		echo " ✓  Removed $(CONF_DIR)"; \
 	else \
 		echo "[i] $(CONF_DIR) not found. Skipping."; \
 	fi
@@ -145,7 +145,19 @@ clean:
 # ─── Check ───────────────────────────────────────────────────────────────────
 
 check:
-	# @echo "[*] Running cargo audit..."
-	# "$(CARGO)" audit
-	@echo "[*] Running clippy..."
-	"$(CARGO)" clippy -- -D warnings
+	@echo "[*] Running security and code quality checks..."
+	@if ! $(CARGO) audit --help >/dev/null 2>&1; then \
+		echo "[!] cargo-audit is not installed."; \
+		echo "    Install it with: cargo install cargo-audit"; \
+		exit 1; \
+	fi
+	@echo "[*] Scanning dependencies for vulnerabilities..."
+	@$(CARGO) audit
+	@echo "[*] Running clippy lints..."
+	@if ! $(CARGO) clippy --help >/dev/null 2>&1; then \
+		echo "[!] cargo-clippy is not installed."; \
+		echo "    Install it with: rustup component add clippy"; \
+		exit 1; \
+	fi
+	@$(CARGO) clippy -- -D warnings
+	@echo "[✓] All checks completed successfully."
