@@ -13,6 +13,12 @@ use std::ffi::OsStr;
 use std::path::Path;
 use toml::Value;
 
+struct RuleSpec<'a> {
+    user: Option<&'a str>,
+    group: Option<&'a str>,
+    cmd: &'a str,
+}
+
 /// Finds the first rule in the configuration that authorises the current user
 /// to run the requested command.
 ///
@@ -30,39 +36,30 @@ pub fn match_rule(cfg: &Value, command: &[String], resolved_command: &str) -> Re
         .context("Failed to look up current user in the system database")?;
     let user_groups = user_obj.groups().unwrap_or_default();
 
-    let idx = rules
-        .iter()
-        .position(|rule_val| {
-            let empty = toml::map::Map::new();
-            let rule = rule_val.as_table().unwrap_or(&empty);
+    for (idx, rule_val) in rules.iter().enumerate() {
+        let rule = parse_rule(rule_val, idx)?;
 
-            let user_match = rule
-                .get("user")
-                .and_then(|u| u.as_str())
-                .is_some_and(|u| u == current_user.to_string_lossy());
+        let user_match = rule
+            .user
+            .is_some_and(|u| u == current_user.to_string_lossy());
 
-            let group_match = rule
-                .get("group")
-                .and_then(|g| g.as_str())
-                .is_some_and(|g| user_groups.iter().any(|grp| grp.name() == OsStr::new(g)));
+        let group_match = rule
+            .group
+            .is_some_and(|g| user_groups.iter().any(|grp| grp.name() == OsStr::new(g)));
 
-            let cmd_match = rule
-                .get("cmd")
-                .and_then(|c| c.as_str())
-                .is_none_or(|c| matches_rule_command(c, &command[0], resolved_command));
+        let cmd_match = matches_rule_command(rule.cmd, &command[0], resolved_command);
 
-            (user_match || group_match) && cmd_match
-        })
-        .ok_or_else(|| {
-            crate::audit::log_denied(&current_user.to_string_lossy(), command);
-            eprintln!(
-                "odus: permission denied for {}.",
-                current_user.to_string_lossy()
-            );
-            anyhow::anyhow!("Permission denied")
-        })?;
+        if (user_match || group_match) && cmd_match {
+            return Ok(rule_val.clone());
+        }
+    }
 
-    Ok(rules[idx].clone())
+    crate::audit::log_denied(&current_user.to_string_lossy(), command);
+    eprintln!(
+        "odus: permission denied for {}.",
+        current_user.to_string_lossy()
+    );
+    Err(anyhow::anyhow!("Permission denied"))
 }
 
 fn matches_rule_command(rule_cmd: &str, original_command: &str, resolved_command: &str) -> bool {
@@ -81,6 +78,67 @@ fn matches_rule_command(rule_cmd: &str, original_command: &str, resolved_command
     } else {
         target == rule_cmd
     }
+}
+
+/// Parses a raw TOML rule entry into validated string fields.
+fn parse_rule<'a>(rule_val: &'a Value, index: usize) -> Result<RuleSpec<'a>> {
+    let rule = rule_val
+        .as_table()
+        .ok_or_else(|| anyhow::anyhow!("Rule {} is invalid: expected a TOML table", index + 1))?;
+
+    let user = optional_string_field(rule, "user", index)?;
+    let group = optional_string_field(rule, "group", index)?;
+    let cmd = required_string_field(rule, "cmd", index)?;
+
+    validate_rule_command(cmd, index)?;
+
+    Ok(RuleSpec { user, group, cmd })
+}
+
+/// Reads an optional string field from a rule and fails closed on type mismatches.
+fn optional_string_field<'a>(
+    rule: &'a toml::map::Map<String, Value>,
+    field: &str,
+    index: usize,
+) -> Result<Option<&'a str>> {
+    match rule.get(field) {
+        None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| anyhow::anyhow!("Rule {} has invalid '{}' field", index + 1, field)),
+    }
+}
+
+/// Reads a required string field from a rule and reports a precise configuration error.
+fn required_string_field<'a>(
+    rule: &'a toml::map::Map<String, Value>,
+    field: &str,
+    index: usize,
+) -> Result<&'a str> {
+    optional_string_field(rule, field, index)?
+        .ok_or_else(|| anyhow::anyhow!("Rule {} is missing required '{}' field", index + 1, field))
+}
+
+/// Validates rule command syntax before the match logic is evaluated.
+///
+/// This keeps malformed or ambiguous rules from silently authorising access.
+fn validate_rule_command(cmd: &str, index: usize) -> Result<()> {
+    if cmd.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Rule {} has an empty 'cmd' field",
+            index + 1
+        ));
+    }
+
+    if cmd == "*" {
+        return Err(anyhow::anyhow!(
+            "Rule {} must use 'ALL' for full command access, not '*'",
+            index + 1
+        ));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -124,5 +182,61 @@ mod tests {
         let command = vec!["ls".to_string()];
 
         assert!(match_rule(&cfg, &command, "/bin/ls").is_ok());
+    }
+
+    #[test]
+    fn missing_cmd_field_is_rejected() {
+        let user = users::get_current_username()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let cfg: Value = toml::from_str(&format!(
+            r#"
+                [[rules]]
+                user = "{user}"
+            "#
+        ))
+        .unwrap();
+        let command = vec!["ls".to_string()];
+
+        assert!(match_rule(&cfg, &command, "/bin/ls").is_err());
+    }
+
+    #[test]
+    fn non_string_cmd_field_is_rejected() {
+        let user = users::get_current_username()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let cfg: Value = toml::from_str(&format!(
+            r#"
+                [[rules]]
+                user = "{user}"
+                cmd = 42
+            "#
+        ))
+        .unwrap();
+        let command = vec!["ls".to_string()];
+
+        assert!(match_rule(&cfg, &command, "/bin/ls").is_err());
+    }
+
+    #[test]
+    fn bare_star_cmd_is_rejected() {
+        let user = users::get_current_username()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let cfg: Value = toml::from_str(&format!(
+            r#"
+                [[rules]]
+                user = "{user}"
+                cmd = "*"
+            "#
+        ))
+        .unwrap();
+        let command = vec!["ls".to_string()];
+
+        assert!(match_rule(&cfg, &command, "/bin/ls").is_err());
     }
 }
