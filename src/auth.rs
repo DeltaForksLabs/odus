@@ -28,6 +28,8 @@ use std::time::{Duration, SystemTime};
 use toml::Value;
 
 const PAM_SERVICE: &str = "odus";
+const PAM_CREATE_MODE: u32 = 0o600;
+const PAM_FINAL_MODE: Mode = Mode::from_bits_truncate(0o644);
 
 // ─── Password memory safety ─────────────────────────────────────────────────
 
@@ -58,19 +60,25 @@ impl Drop for SensitiveString {
 
 /// Ensures /etc/pam.d/odus exists and is owned by root.
 ///
-/// Fix M1: uses create_new (O_CREAT|O_EXCL) + O_NOFOLLOW — atomic, no TOCTOU.
+/// Security:
+///   - create_new (O_CREAT|O_EXCL) + O_NOFOLLOW — atomic, no TOCTOU
+///   - initial mode 0600 — safe regardless of caller umask
+///   - final mode 0644 applied only after the full content is written
 pub fn ensure_pam_service() -> Result<()> {
     let pam_path = std::path::PathBuf::from(format!("/etc/pam.d/{PAM_SERVICE}"));
 
     match OpenOptions::new()
         .write(true)
         .create_new(true) // O_CREAT | O_EXCL — atomic
+        .mode(PAM_CREATE_MODE)
         .custom_flags(libc::O_NOFOLLOW) // reject symlinks on the final component
         .open(&pam_path)
     {
         Ok(mut file) => {
             file.write_all(pam_content().as_bytes())
                 .context("Failed to write PAM service file")?;
+            file.sync_all()
+                .context("Failed to flush PAM service file to disk")?;
 
             // fchmod/fchown via AsFd — no as_raw_fd(), no path re-open.
             fchown(
@@ -79,7 +87,7 @@ pub fn ensure_pam_service() -> Result<()> {
                 Some(Gid::from_raw(0)),
             )
             .context("Failed to set root ownership on PAM file")?;
-            fchmod(file.as_raw_fd(), Mode::from_bits_truncate(0o644))
+            fchmod(file.as_raw_fd(), PAM_FINAL_MODE)
                 .context("Failed to set 0644 permissions on PAM file")?;
 
             eprintln!("odus: PAM service file created at {}", pam_path.display());
@@ -371,7 +379,28 @@ fn verify_pam_integrity(pam_path: &Path) -> Result<()> {
         return Err(anyhow::anyhow!("PAM service file is not owned by root"));
     }
 
+    if !pam_permissions_are_safe(stat.st_mode) {
+        crate::audit::log_security(&format!(
+            "PAM file {} has unsafe permissions mode={:#o}",
+            pam_path.display(),
+            stat.st_mode
+        ));
+        eprintln!(
+            "odus: security error — {} must not be writable by group or others",
+            pam_path.display()
+        );
+        return Err(anyhow::anyhow!("PAM service file has unsafe permissions"));
+    }
+
     Ok(())
+}
+
+/// Returns `true` when an existing PAM service file has non-writable,
+/// non-executable permissions suitable for a root-owned policy file.
+fn pam_permissions_are_safe(st_mode: libc::mode_t) -> bool {
+    let perms = st_mode & 0o7777;
+
+    perms & 0o022 == 0 && perms & 0o111 == 0 && perms & 0o7000 == 0
 }
 
 /// Returns the PAM configuration content for the current OS.
@@ -412,4 +441,28 @@ password   include      system
 
     #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
     compile_error!("Unsupported OS. Add a PAM configuration block for this target.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pam_permissions_are_safe;
+
+    #[test]
+    fn pam_permissions_allow_safe_readable_modes() {
+        assert!(pam_permissions_are_safe(0o600));
+        assert!(pam_permissions_are_safe(0o640));
+        assert!(pam_permissions_are_safe(0o644));
+    }
+
+    #[test]
+    fn pam_permissions_reject_group_or_world_write_bits() {
+        assert!(!pam_permissions_are_safe(0o664));
+        assert!(!pam_permissions_are_safe(0o666));
+    }
+
+    #[test]
+    fn pam_permissions_reject_exec_and_special_bits() {
+        assert!(!pam_permissions_are_safe(0o755));
+        assert!(!pam_permissions_are_safe(0o4644));
+    }
 }
