@@ -25,11 +25,7 @@ pub fn init() {
     // the ability to (re-)connect to the syslog socket.
     let ident = CString::new("odus").expect("static string, never fails");
     unsafe {
-        libc::openlog(
-            ident.as_ptr(),
-            libc::LOG_PID | libc::LOG_NDELAY,
-            FACILITY,
-        );
+        libc::openlog(ident.as_ptr(), libc::LOG_PID | libc::LOG_NDELAY, FACILITY);
     }
     std::mem::forget(ident);
 }
@@ -52,13 +48,19 @@ pub fn log_cache_hit(user: &str) {
 
 /// Logs a failed authentication attempt (wrong password, PAM rejection, etc.).
 pub fn log_auth_fail(user: &str, reason: &str) {
-    syslog(libc::LOG_WARNING, &format!("AUTH FAIL user={user} reason={reason}"));
+    syslog(
+        libc::LOG_WARNING,
+        &format!("AUTH FAIL user={user} reason={reason}"),
+    );
 }
 
 /// Logs an authorisation denial (no matching rule found for this user/command).
 pub fn log_denied(user: &str, command: &[String]) {
     let cmd = command.join(" ");
-    syslog(libc::LOG_WARNING, &format!("DENIED user={user} cmd=\"{cmd}\""));
+    syslog(
+        libc::LOG_WARNING,
+        &format!("DENIED user={user} cmd=\"{cmd}\""),
+    );
 }
 
 /// Logs a security-relevant anomaly (tampered file, unexpected symlink, etc.).

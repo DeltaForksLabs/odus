@@ -10,13 +10,28 @@
 use anyhow::{Context, Result};
 use nix::unistd::{Gid, Uid, execve, setgid, setgroups, setuid};
 use std::ffi::CString;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use toml::Value;
+
+/// Resolves and validates the executable path before policy evaluation.
+///
+/// Security:
+///   - absolute paths must already be normalised (no '.' or '..' segments)
+///   - relative commands must be bare executable names, never subpaths
+///   - secure_path entries must be absolute directories
+pub fn prepare_command(command: &[String], cfg: &Value) -> Result<Vec<String>> {
+    let secure_paths = load_secure_paths(cfg)?;
+    let abs_cmd = resolve_command(&command[0], &secure_paths)?;
+
+    let mut prepared = command.to_vec();
+    prepared[0] = abs_cmd;
+    Ok(prepared)
+}
 
 /// Elevates to root (setgid + setuid) and replaces the process image with
 /// `command` via execvp. Never returns on success.
 pub fn run_as_root(command: &[String], cfg: &Value) -> Result<()> {
-    let secure_paths = load_secure_paths(cfg);
+    let secure_paths = load_secure_paths(cfg)?;
 
     // Replace the inherited (user-controlled) PATH with the trusted secure_path.
     // Fix I3: any binary legitimately executed as root that internally calls
@@ -76,8 +91,8 @@ pub fn run_as_root(command: &[String], cfg: &Value) -> Result<()> {
 // ─── Private ────────────────────────────────────────────────────────────────
 
 /// Loads the secure_path from config, accepting both TOML array and colon-separated string.
-fn load_secure_paths(cfg: &Value) -> Vec<String> {
-    match cfg.get("secure_path") {
+fn load_secure_paths(cfg: &Value) -> Result<Vec<String>> {
+    let raw_paths = match cfg.get("secure_path") {
         Some(v) if v.is_array() => v
             .as_array()
             .unwrap()
@@ -93,7 +108,23 @@ fn load_secure_paths(cfg: &Value) -> Vec<String> {
             "/usr/local/bin".into(),
             "/usr/local/sbin".into(),
         ],
+    };
+
+    let secure_paths = raw_paths
+        .into_iter()
+        .map(|path| {
+            normalize_absolute_path(Path::new(&path))
+                .with_context(|| format!("Invalid secure_path entry '{path}'"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if secure_paths.is_empty() {
+        return Err(anyhow::anyhow!(
+            "secure_path must contain at least one absolute directory"
+        ));
     }
+
+    Ok(secure_paths)
 }
 
 /// Resolves `cmd` to an absolute path.
@@ -101,12 +132,16 @@ fn load_secure_paths(cfg: &Value) -> Vec<String> {
 /// - Absolute paths are used as-is (existence verified by execvp).
 /// - Relative names are searched in secure_path in order.
 fn resolve_command(cmd: &str, secure_paths: &[String]) -> Result<String> {
-    if Path::new(cmd).is_absolute() {
-        return Ok(cmd.to_string());
+    let cmd_path = Path::new(cmd);
+
+    if cmd_path.is_absolute() {
+        return normalize_absolute_path(cmd_path);
     }
 
+    let bare_name = validate_relative_command(cmd_path)?;
+
     for dir in secure_paths {
-        let candidate = Path::new(dir).join(cmd);
+        let candidate = Path::new(dir).join(&bare_name);
         if candidate.is_file() {
             return Ok(candidate.to_string_lossy().into_owned());
         }
@@ -117,4 +152,108 @@ fn resolve_command(cmd: &str, secure_paths: &[String]) -> Result<String> {
         cmd,
         secure_paths
     ))
+}
+
+fn normalize_absolute_path(path: &Path) -> Result<String> {
+    if !path.is_absolute() {
+        return Err(anyhow::anyhow!(
+            "Expected an absolute path, got '{}'",
+            path.display()
+        ));
+    }
+
+    let mut normalized = PathBuf::from("/");
+
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::CurDir | Component::ParentDir => {
+                return Err(anyhow::anyhow!(
+                    "Command paths must not contain '.' or '..' segments: {}",
+                    path.display()
+                ));
+            }
+            Component::Prefix(_) => {
+                return Err(anyhow::anyhow!(
+                    "Unsupported path prefix in command path: {}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    Ok(normalized.to_string_lossy().into_owned())
+}
+
+fn validate_relative_command(path: &Path) -> Result<String> {
+    let mut components = path.components();
+
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(name)), None) => Ok(name.to_string_lossy().into_owned()),
+        _ => Err(anyhow::anyhow!(
+            "Relative commands must be bare executable names, not paths: {}",
+            path.display()
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::{self, File};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn config_with_secure_path(path: &Path) -> Value {
+        toml::from_str(&format!(r#"secure_path = ["{}"]"#, path.display())).unwrap()
+    }
+
+    fn unique_temp_dir() -> PathBuf {
+        let mut dir = std::env::temp_dir();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        dir.push(format!("odus-tests-{}-{stamp}", std::process::id()));
+        dir
+    }
+
+    #[test]
+    fn prepare_command_rejects_absolute_parent_segments() {
+        let cfg: Value = toml::from_str(r#"secure_path = ["/usr/bin"]"#).unwrap();
+        let command = vec!["/usr/bin/../../bin/sh".to_string()];
+
+        assert!(prepare_command(&command, &cfg).is_err());
+    }
+
+    #[test]
+    fn prepare_command_rejects_relative_subpaths() {
+        let dir = unique_temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+
+        let cfg = config_with_secure_path(&dir);
+        let command = vec!["bin/sh".to_string()];
+
+        assert!(prepare_command(&command, &cfg).is_err());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn prepare_command_resolves_bare_names_from_secure_path() {
+        let dir = unique_temp_dir();
+        fs::create_dir_all(&dir).unwrap();
+
+        let binary = dir.join("tool");
+        File::create(&binary).unwrap();
+
+        let cfg = config_with_secure_path(&dir);
+        let command = vec!["tool".to_string(), "--version".to_string()];
+        let prepared = prepare_command(&command, &cfg).unwrap();
+
+        assert_eq!(prepared[0], binary.to_string_lossy());
+        assert_eq!(prepared[1], "--version");
+
+        let _ = fs::remove_dir_all(dir);
+    }
 }

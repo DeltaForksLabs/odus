@@ -17,7 +17,7 @@ use crate::security;
 use anyhow::{Context, Result};
 use nix::sys::stat::{Mode, SFlag, fchmod, lstat};
 use nix::unistd::{Gid, Uid, fchown, getsid};
-use pam::{Authenticator};
+use pam::Authenticator;
 use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::{Read, Write as IoWrite, stdout};
 use std::os::fd::AsRawFd;

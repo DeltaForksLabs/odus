@@ -1,10 +1,10 @@
 mod audit;
+mod auth;
 mod cli;
 mod config;
-mod rules;
-mod auth;
-mod security;
 mod exec;
+mod rules;
+mod security;
 
 use anyhow::Result;
 
@@ -24,15 +24,20 @@ fn main() -> Result<()> {
     // Load and parse /etc/odus.toml.
     let cfg = config::load()?;
 
+    // Resolve and validate the executable path before authorisation.
+    // This rejects non-canonical absolute paths such as /usr/bin/../../bin/sh
+    // and relative subpaths such as ../bin/sh, preventing rule-matching bypasses.
+    let prepared_command = exec::prepare_command(&args.command, &cfg)?;
+
     // Find the rule that authorises the current user to run the command.
-    let rule = rules::match_rule(&cfg, &args.command)?;
+    let rule = rules::match_rule(&cfg, &args.command, &prepared_command[0])?;
 
     // Authenticate via cache or PAM (audit logging included).
-    auth::authenticate(&cfg, &rule, &args.command)?;
+    auth::authenticate(&cfg, &rule, &prepared_command)?;
 
     // Replace the process image with the target command running as root.
     // This call never returns on success.
-    exec::run_as_root(&args.command, &cfg)?;
+    exec::run_as_root(&prepared_command, &cfg)?;
 
     Ok(())
 }

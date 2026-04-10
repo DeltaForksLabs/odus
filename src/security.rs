@@ -50,7 +50,9 @@ pub fn open_and_verify_cache(cache_file: &Path) -> Result<Option<File>> {
         Ok(file) => {
             // file.metadata() calls fstat(2) on the open file descriptor.
             // Unlike stat(path), this is immune to inode substitution after open.
-            let meta = file.metadata().context("Failed to stat authentication cache")?;
+            let meta = file
+                .metadata()
+                .context("Failed to stat authentication cache")?;
 
             if meta.uid() != 0 {
                 crate::audit::log_security(&format!(
@@ -70,9 +72,7 @@ pub fn open_and_verify_cache(cache_file: &Path) -> Result<Option<File>> {
                     cache_file.display(),
                     meta.mode()
                 ));
-                return Err(anyhow::anyhow!(
-                    "Security: cache is not a regular file"
-                ));
+                return Err(anyhow::anyhow!("Security: cache is not a regular file"));
             }
 
             Ok(Some(file))
