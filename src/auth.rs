@@ -18,18 +18,27 @@ use anyhow::{Context, Result};
 use nix::sys::stat::{Mode, SFlag, fchmod, lstat};
 use nix::unistd::{Gid, Uid, fchown, getsid};
 use pam::Authenticator;
-use std::fs::{File, OpenOptions, create_dir_all};
+use std::fs::{File, OpenOptions, create_dir, read_dir, remove_file};
 use std::io::{Read, Write as IoWrite, stdout};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{Ordering, compiler_fence};
+use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use toml::Value;
 
 const PAM_SERVICE: &str = "odus";
 const PAM_CREATE_MODE: u32 = 0o600;
 const PAM_FINAL_MODE: Mode = Mode::from_bits_truncate(0o644);
+const SECURE_RUNTIME_DIR_MODE: Mode = Mode::from_bits_truncate(0o700);
+const STATE_FILE_MODE: Mode = Mode::from_bits_truncate(0o600);
+const RUNTIME_DIR: &str = "/var/run/odus";
+const CACHE_DIR_NAME: &str = "ts";
+const RATE_LIMIT_DIR_NAME: &str = "fails";
+const AUTH_FAILURE_COOLDOWN: Duration = Duration::from_secs(2);
+const FAILURE_STATE_RETENTION: Duration = Duration::from_secs(15 * 60);
+const SESSION_CACHE_MAX_AGE: Duration = Duration::from_secs(12 * 60 * 60);
 
 // ─── Password memory safety ─────────────────────────────────────────────────
 
@@ -144,15 +153,17 @@ pub fn authenticate(cfg: &Value, rule: &Value, command: &[String]) -> Result<()>
     let current_user = users::get_current_username().unwrap_or_default();
     let username = current_user.to_string_lossy();
 
-    let cache_dir = Path::new("/var/run/odus/ts");
-    ensure_cache_dir(cache_dir)?;
+    let (cache_dir, rate_limit_dir) = ensure_runtime_dirs()?;
+    cleanup_state_files(&cache_dir, &rate_limit_dir, &cache_mode)?;
 
     // Cache file includes the Session ID so each login session gets its own file.
     // When a session ends its SID is never reused, so the old cache is naturally
-    // invalidated — this is the mechanism behind cache_timeout = -1.
+    // invalidated in practice. A hard TTL is still enforced to bound replay risk
+    // if an SID is ever reused after process-id wrap-around.
     let sid = getsid(None).unwrap_or(nix::unistd::Pid::from_raw(0));
     let cache_name = format!("{username}_{sid}");
     let cache_file = cache_dir.join(&cache_name);
+    let rate_limit_file = rate_limit_dir.join(username.as_ref());
 
     if nopasswd {
         crate::audit::log_exec(&username, command);
@@ -169,6 +180,7 @@ pub fn authenticate(cfg: &Value, rule: &Value, command: &[String]) -> Result<()>
             let mut attempts_left = max_tries;
 
             loop {
+                enforce_failure_cooldown(&rate_limit_file)?;
                 eprint!("[odus] password for {username}: ");
                 stdout().flush().ok();
 
@@ -178,6 +190,8 @@ pub fn authenticate(cfg: &Value, rule: &Value, command: &[String]) -> Result<()>
 
                 match do_pam_auth(&username, &password.0) {
                     Ok(()) => {
+                        clear_state_file(&rate_limit_file)
+                            .context("Failed to clear authentication cooldown state")?;
                         crate::audit::log_auth_ok(&username);
                         crate::audit::log_exec(&username, command);
                         drop(password);
@@ -188,6 +202,7 @@ pub fn authenticate(cfg: &Value, rule: &Value, command: &[String]) -> Result<()>
                         // Do NOT surface PAM internals (error codes) to the user —
                         // they provide no value to a legitimate user but may aid an attacker.
                         crate::audit::log_auth_fail(&username, &e.to_string());
+                        record_auth_failure(&rate_limit_file)?;
                         drop(password);
                         attempts_left -= 1;
 
@@ -247,18 +262,21 @@ pub fn needs_auth(cache_file: &Path, mode: &CacheMode) -> Result<bool> {
                 return Ok(true); // corrupted cache → re-authenticate
             };
 
+            let cached = SystemTime::UNIX_EPOCH + Duration::from_secs(ts);
+            let elapsed = SystemTime::now()
+                .duration_since(cached)
+                .unwrap_or(Duration::MAX);
+
             match mode {
                 // Session mode: any valid (root-owned) cache file for this SID
-                // means the user already authenticated in this session.
-                CacheMode::Session => Ok(false),
+                // means the user already authenticated in this session, but a
+                // hard upper bound still applies so stale files cannot replay
+                // indefinitely if the SID is reused after wrap-around.
+                CacheMode::Session => Ok(elapsed >= SESSION_CACHE_MAX_AGE),
 
                 // Timed mode: check whether the cached timestamp is still fresh.
                 CacheMode::Timed(minutes) => {
-                    let cached = SystemTime::UNIX_EPOCH + Duration::from_secs(ts);
                     let timeout = Duration::from_secs(minutes * 60);
-                    let elapsed = SystemTime::now()
-                        .duration_since(cached)
-                        .unwrap_or(Duration::MAX);
                     Ok(elapsed >= timeout)
                 }
 
@@ -280,28 +298,7 @@ pub fn update_cache(cache_file: &Path) -> Result<()> {
         .unwrap_or(Duration::ZERO)
         .as_secs();
 
-    let file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600) // explicit — do not rely on umask
-        .custom_flags(libc::O_NOFOLLOW) // reject symlinks
-        .open(cache_file)
-        .context("Failed to open cache file for writing")?;
-
-    // Defence in depth: confirm owner and permissions on the open fd.
-    fchown(
-        file.as_raw_fd(),
-        Some(Uid::from_raw(0)),
-        Some(Gid::from_raw(0)),
-    )
-    .context("Failed to set root ownership on cache file")?;
-    fchmod(file.as_raw_fd(), Mode::from_bits_truncate(0o600))
-        .context("Failed to set 0600 permissions on cache file")?;
-
-    (&file)
-        .write_all(now.to_string().as_bytes())
-        .context("Failed to write timestamp to cache file")
+    write_state_file(cache_file, &now.to_string()).context("Failed to update authentication cache")
 }
 
 // ─── Private ────────────────────────────────────────────────────────────────
@@ -313,37 +310,210 @@ fn do_pam_auth(username: &str, password: &str) -> Result<()> {
         .context("PAM authentication failed — incorrect password")
 }
 
-/// Creates and secures the authentication cache directory.
+/// Creates and secures the odus runtime directories under `/var/run/odus`.
 ///
-/// Fix C3: directory must be root-owned and mode 0700 (no access for others).
-/// Uses open-fd fchmod instead of the non-existent nix::sys::stat::chmod.
-fn ensure_cache_dir(cache_dir: &Path) -> Result<()> {
-    create_dir_all(cache_dir).context("Failed to create cache directory")?;
+/// Both the parent directory and the child state directories are verified as
+/// root-owned directories and forced to mode 0700 to prevent path substitution
+/// or disclosure through an insecure intermediate directory.
+fn ensure_runtime_dirs() -> Result<(PathBuf, PathBuf)> {
+    let runtime_dir = PathBuf::from(RUNTIME_DIR);
+    let cache_dir = runtime_dir.join(CACHE_DIR_NAME);
+    let rate_limit_dir = runtime_dir.join(RATE_LIMIT_DIR_NAME);
 
-    // lstat does not follow symlinks.
-    let stat = lstat(cache_dir).context("Failed to stat cache directory")?;
+    ensure_secure_dir(&runtime_dir, "runtime directory")?;
+    ensure_secure_dir(&cache_dir, "cache directory")?;
+    ensure_secure_dir(&rate_limit_dir, "rate-limit directory")?;
 
-    if stat.st_uid != 0 {
+    Ok((cache_dir, rate_limit_dir))
+}
+
+/// Ensures a state directory exists, is a real directory, and is only
+/// accessible to root.
+fn ensure_secure_dir(path: &Path, label: &str) -> Result<()> {
+    match create_dir(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e).with_context(|| format!("Failed to create {label}")),
+    }
+
+    let stat = lstat(path).with_context(|| format!("Failed to stat {label}"))?;
+
+    let file_type = SFlag::from_bits_truncate(stat.st_mode);
+    if !file_type.contains(SFlag::S_IFDIR) {
         crate::audit::log_security(&format!(
-            "cache directory {} has invalid owner uid={}",
-            cache_dir.display(),
-            stat.st_uid
+            "{} {} is not a directory (mode={:#o})",
+            label,
+            path.display(),
+            stat.st_mode
         ));
         return Err(anyhow::anyhow!(
-            "Security: cache directory is not owned by root"
+            "Security: {} is not a directory",
+            path.display()
         ));
     }
 
-    // Fix insecure permissions if needed (e.g. created by an old version or manually).
-    // Open the directory as a file descriptor, then call fchmod on it.
-    // nix does not expose chmod-by-path; the correct API is fchmod on an open fd.
-    if stat.st_mode & 0o077 != 0 {
-        let dir_fd = File::open(cache_dir).context("Failed to open cache directory for fchmod")?;
-        fchmod(dir_fd.as_raw_fd(), Mode::from_bits_truncate(0o700))
-            .context("Failed to fix cache directory permissions")?;
+    if stat.st_uid != 0 || stat.st_gid != 0 {
+        crate::audit::log_security(&format!(
+            "{} {} has invalid owner uid={} gid={}",
+            label,
+            path.display(),
+            stat.st_uid,
+            stat.st_gid
+        ));
+        return Err(anyhow::anyhow!(
+            "Security: {} is not owned by root",
+            path.display()
+        ));
+    }
+
+    let dir_fd =
+        File::open(path).with_context(|| format!("Failed to open {label} for hardening"))?;
+    fchmod(dir_fd.as_raw_fd(), SECURE_RUNTIME_DIR_MODE)
+        .with_context(|| format!("Failed to set 0700 on {label}"))?;
+
+    Ok(())
+}
+
+/// Applies rate limiting between invocations by pausing until the stored
+/// cooldown expires.
+fn enforce_failure_cooldown(rate_limit_file: &Path) -> Result<()> {
+    let Some(next_allowed_at) = read_state_timestamp(rate_limit_file)? else {
+        return Ok(());
+    };
+
+    let now = unix_now_secs();
+    if next_allowed_at > now {
+        sleep(Duration::from_secs(next_allowed_at - now));
     }
 
     Ok(())
+}
+
+/// Records the next time a new password prompt may be shown after a failure.
+fn record_auth_failure(rate_limit_file: &Path) -> Result<()> {
+    let next_allowed_at = unix_now_secs() + AUTH_FAILURE_COOLDOWN.as_secs();
+    write_state_file(rate_limit_file, &next_allowed_at.to_string())
+        .context("Failed to persist authentication cooldown state")
+}
+
+/// Removes a root-owned state file if it exists.
+fn clear_state_file(path: &Path) -> Result<()> {
+    match remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("Failed to remove state file {}", path.display())),
+    }
+}
+
+/// Writes a root-owned state file with mode 0600 using an fd-based ownership
+/// and permission hardening step.
+fn write_state_file(path: &Path, content: &str) -> Result<()> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(STATE_FILE_MODE.bits())
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .with_context(|| format!("Failed to open state file {}", path.display()))?;
+
+    fchown(
+        file.as_raw_fd(),
+        Some(Uid::from_raw(0)),
+        Some(Gid::from_raw(0)),
+    )
+    .with_context(|| format!("Failed to set root ownership on {}", path.display()))?;
+    fchmod(file.as_raw_fd(), STATE_FILE_MODE)
+        .with_context(|| format!("Failed to set 0600 permissions on {}", path.display()))?;
+
+    (&file)
+        .write_all(content.as_bytes())
+        .with_context(|| format!("Failed to write state file {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to flush state file {}", path.display()))
+}
+
+/// Reads a validated root-owned state file and parses its UNIX timestamp.
+fn read_state_timestamp(path: &Path) -> Result<Option<u64>> {
+    let Some(mut file) = security::open_and_verify_cache(path)? else {
+        return Ok(None);
+    };
+
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)
+        .with_context(|| format!("Failed to read state file {}", path.display()))?;
+
+    Ok(buf.trim().parse::<u64>().ok())
+}
+
+/// Removes expired cache and rate-limit files so short-lived runtime state does
+/// not accumulate indefinitely under `/var/run/odus`.
+fn cleanup_state_files(cache_dir: &Path, rate_limit_dir: &Path, mode: &CacheMode) -> Result<()> {
+    cleanup_cache_files(cache_dir, cache_retention(mode))?;
+    cleanup_rate_limit_files(rate_limit_dir)
+}
+
+/// Returns how long cache files may live before odus removes them automatically.
+fn cache_retention(mode: &CacheMode) -> Duration {
+    match mode {
+        CacheMode::AlwaysPrompt => Duration::ZERO,
+        CacheMode::Timed(minutes) => Duration::from_secs(minutes * 60),
+        CacheMode::Session => SESSION_CACHE_MAX_AGE,
+    }
+}
+
+/// Deletes expired or invalid cache files from the secure cache directory.
+fn cleanup_cache_files(cache_dir: &Path, retention: Duration) -> Result<()> {
+    for entry in
+        read_dir(cache_dir).with_context(|| format!("Failed to read {}", cache_dir.display()))?
+    {
+        let entry = entry.context("Failed to iterate cache directory entry")?;
+        let path = entry.path();
+
+        let should_remove = if retention.is_zero() {
+            true
+        } else {
+            match read_state_timestamp(&path)? {
+                Some(ts) => unix_now_secs().saturating_sub(ts) >= retention.as_secs(),
+                None => true,
+            }
+        };
+
+        if should_remove {
+            clear_state_file(&path)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Deletes stale rate-limit files once they are well past their cooldown window.
+fn cleanup_rate_limit_files(rate_limit_dir: &Path) -> Result<()> {
+    for entry in read_dir(rate_limit_dir)
+        .with_context(|| format!("Failed to read {}", rate_limit_dir.display()))?
+    {
+        let entry = entry.context("Failed to iterate rate-limit directory entry")?;
+        let path = entry.path();
+
+        let should_remove = match read_state_timestamp(&path)? {
+            Some(ts) => unix_now_secs().saturating_sub(ts) >= FAILURE_STATE_RETENTION.as_secs(),
+            None => true,
+        };
+
+        if should_remove {
+            clear_state_file(&path)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns the current UNIX time in seconds and clamps pre-epoch anomalies to 0.
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
 }
 
 /// Verifies the integrity of an existing PAM service file.
@@ -445,7 +615,11 @@ password   include      system
 
 #[cfg(test)]
 mod tests {
-    use super::pam_permissions_are_safe;
+    use super::{
+        AUTH_FAILURE_COOLDOWN, CacheMode, FAILURE_STATE_RETENTION, SESSION_CACHE_MAX_AGE,
+        cache_retention, pam_permissions_are_safe, unix_now_secs,
+    };
+    use std::time::Duration;
 
     #[test]
     fn pam_permissions_allow_safe_readable_modes() {
@@ -464,5 +638,30 @@ mod tests {
     fn pam_permissions_reject_exec_and_special_bits() {
         assert!(!pam_permissions_are_safe(0o755));
         assert!(!pam_permissions_are_safe(0o4644));
+    }
+
+    #[test]
+    fn session_cache_retention_is_bounded() {
+        assert_eq!(cache_retention(&CacheMode::Session), SESSION_CACHE_MAX_AGE);
+    }
+
+    #[test]
+    fn always_prompt_retention_removes_all_cache_files() {
+        assert_eq!(cache_retention(&CacheMode::AlwaysPrompt), Duration::ZERO);
+    }
+
+    #[test]
+    fn timed_cache_retention_tracks_configured_minutes() {
+        assert_eq!(
+            cache_retention(&CacheMode::Timed(15)),
+            Duration::from_secs(15 * 60)
+        );
+    }
+
+    #[test]
+    fn cooldown_constants_are_non_zero_and_ordered() {
+        assert!(AUTH_FAILURE_COOLDOWN > Duration::ZERO);
+        assert!(FAILURE_STATE_RETENTION > AUTH_FAILURE_COOLDOWN);
+        assert!(unix_now_secs() > 0);
     }
 }
