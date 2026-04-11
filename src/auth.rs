@@ -150,7 +150,7 @@ pub fn authenticate(cfg: &Value, rule: &Value, command: &[String]) -> Result<()>
         .unwrap_or(3)
         .clamp(1, 10) as u32;
 
-    let current_user = users::get_current_username().unwrap_or_default();
+    let current_user = uzers::get_current_username().unwrap_or_default();
     let username = current_user.to_string_lossy();
 
     let (cache_dir, rate_limit_dir) = ensure_runtime_dirs()?;

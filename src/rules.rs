@@ -31,8 +31,8 @@ pub fn match_rule(cfg: &Value, command: &[String], resolved_command: &str) -> Re
         anyhow::anyhow!("Missing 'rules' in config")
     })?;
 
-    let current_user = users::get_current_username().unwrap_or_default();
-    let user_obj = users::get_user_by_name(current_user.to_string_lossy().as_ref())
+    let current_user = uzers::get_current_username().unwrap_or_default();
+    let user_obj = uzers::get_user_by_name(current_user.to_string_lossy().as_ref())
         .context("Failed to look up current user in the system database")?;
     let user_groups = user_obj.groups().unwrap_or_default();
 
@@ -146,7 +146,7 @@ mod tests {
     use super::*;
 
     fn config_for_current_user(cmd: &str) -> Value {
-        let user = users::get_current_username()
+        let user = uzers::get_current_username()
             .unwrap()
             .to_string_lossy()
             .into_owned();
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn missing_cmd_field_is_rejected() {
-        let user = users::get_current_username()
+        let user = uzers::get_current_username()
             .unwrap()
             .to_string_lossy()
             .into_owned();
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn non_string_cmd_field_is_rejected() {
-        let user = users::get_current_username()
+        let user = uzers::get_current_username()
             .unwrap()
             .to_string_lossy()
             .into_owned();
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn bare_star_cmd_is_rejected() {
-        let user = users::get_current_username()
+        let user = uzers::get_current_username()
             .unwrap()
             .to_string_lossy()
             .into_owned();

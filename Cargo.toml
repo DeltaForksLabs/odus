@@ -1,6 +1,6 @@
 [package]
 name    = "odus"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2024"
 
 [dependencies]
@@ -9,7 +9,7 @@ toml = "1.0.7"
 # Syscalls Unix seguras (stat, fchmod, fchown, execvp, setuid, setgid...)
 nix = { version = "0.29", features = ["process", "user", "fs"] }
 # Informações de usuários e grupos (/etc/passwd, /etc/group)
-users = "0.11"
+uzers = "0.12"
 # Error handling idiomático
 anyhow = "1.0.102"
 # Leitura de senha sem echo no terminal
