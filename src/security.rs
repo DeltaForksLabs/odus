@@ -40,7 +40,7 @@ pub fn open_and_verify_cache(cache_file: &Path) -> Result<Option<File>> {
                 cache_file.display()
             ));
             Err(anyhow::anyhow!(
-                "Security: symlink detected at cache path ({})",
+                "security check failed: symlink detected at cache path ({})",
                 cache_file.display()
             ))
         }
@@ -61,7 +61,7 @@ pub fn open_and_verify_cache(cache_file: &Path) -> Result<Option<File>> {
                     meta.uid()
                 ));
                 return Err(anyhow::anyhow!(
-                    "Security: cache file is not owned by root — possible tampering"
+                    "security check failed: cache file is not owned by root — possible tampering"
                 ));
             }
 
@@ -72,7 +72,9 @@ pub fn open_and_verify_cache(cache_file: &Path) -> Result<Option<File>> {
                     cache_file.display(),
                     meta.mode()
                 ));
-                return Err(anyhow::anyhow!("Security: cache is not a regular file"));
+                return Err(anyhow::anyhow!(
+                    "security check failed: cache is not a regular file"
+                ));
             }
 
             Ok(Some(file))

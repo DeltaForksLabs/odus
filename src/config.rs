@@ -164,7 +164,7 @@ fn verify_integrity(config_path: &Path) -> Result<()> {
             stat.st_mode
         ));
         return Err(anyhow::anyhow!(
-            "Security: {} is not a regular file",
+            "security check failed: {} is not a regular file",
             config_path.display()
         ));
     }

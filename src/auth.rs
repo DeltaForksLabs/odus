@@ -18,9 +18,10 @@ use anyhow::{Context, Result};
 use nix::sys::stat::{Mode, SFlag, fchmod, lstat};
 use nix::unistd::{Gid, Uid, fchown, getsid};
 use pam::{Client};
-use std::fs::{File, OpenOptions, create_dir, read_dir, remove_file};
+use std::fs::{OpenOptions, create_dir, read_dir, remove_file};
 use std::io::{Read, Write as IoWrite, stdout};
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{Ordering, compiler_fence};
@@ -110,7 +111,9 @@ pub fn ensure_pam_service() -> Result<()> {
                 "symlink detected at PAM path: {}",
                 pam_path.display()
             ));
-            Err(anyhow::anyhow!("Security: symlink at PAM service path"))
+            Err(anyhow::anyhow!(
+                "security check failed: symlink at PAM service path"
+            ))
         }
 
         Err(e) => Err(e).context("Failed to create PAM service file"),
@@ -312,9 +315,8 @@ fn do_pam_auth(username: &str, password: &str) -> Result<()> {
 
 /// Creates and secures the odus runtime directories under `/var/run/odus`.
 ///
-/// Both the parent directory and the child state directories are verified as
-/// root-owned directories and forced to mode 0700 to prevent path substitution
-/// or disclosure through an insecure intermediate directory.
+/// The directory is opened first and then hardened on the descriptor so an
+/// existing unsafe installation can be corrected without re-resolving paths.
 fn ensure_runtime_dirs() -> Result<(PathBuf, PathBuf)> {
     let runtime_dir = PathBuf::from(RUNTIME_DIR);
     let cache_dir = runtime_dir.join(CACHE_DIR_NAME);
@@ -336,40 +338,64 @@ fn ensure_secure_dir(path: &Path, label: &str) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("Failed to create {label}")),
     }
 
-    let stat = lstat(path).with_context(|| format!("Failed to stat {label}"))?;
+    let dir_fd = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .with_context(|| format!("Failed to open {label} for hardening"))?;
 
-    let file_type = SFlag::from_bits_truncate(stat.st_mode);
-    if !file_type.contains(SFlag::S_IFDIR) {
+    let meta = dir_fd
+        .metadata()
+        .with_context(|| format!("Failed to inspect {label}"))?;
+
+    if !meta.is_dir() {
         crate::audit::log_security(&format!(
             "{} {} is not a directory (mode={:#o})",
             label,
             path.display(),
-            stat.st_mode
+            meta.mode()
         ));
         return Err(anyhow::anyhow!(
-            "Security: {} is not a directory",
+            "security check failed: {} is not a directory",
             path.display()
         ));
     }
 
-    if stat.st_uid != 0 || stat.st_gid != 0 {
+    if meta.uid() != 0 || meta.gid() != 0 {
         crate::audit::log_security(&format!(
-            "{} {} has invalid owner uid={} gid={}",
+            "{} {} has invalid owner uid={} gid={}, resetting to root:root",
             label,
             path.display(),
-            stat.st_uid,
-            stat.st_gid
+            meta.uid(),
+            meta.gid()
+        ));
+        fchown(
+            dir_fd.as_raw_fd(),
+            Some(Uid::from_raw(0)),
+            Some(Gid::from_raw(0)),
+        )
+        .with_context(|| format!("Failed to set root ownership on {label}"))?;
+    }
+
+    fchmod(dir_fd.as_raw_fd(), SECURE_RUNTIME_DIR_MODE)
+        .with_context(|| format!("Failed to set 0700 on {label}"))?;
+
+    let hardened = dir_fd
+        .metadata()
+        .with_context(|| format!("Failed to re-check {label}"))?;
+    if hardened.uid() != 0 || hardened.gid() != 0 {
+        crate::audit::log_security(&format!(
+            "{} {} could not be hardened to root:root (uid={} gid={})",
+            label,
+            path.display(),
+            hardened.uid(),
+            hardened.gid()
         ));
         return Err(anyhow::anyhow!(
-            "Security: {} is not owned by root",
+            "security check failed: {} is not owned by root",
             path.display()
         ));
     }
-
-    let dir_fd =
-        File::open(path).with_context(|| format!("Failed to open {label} for hardening"))?;
-    fchmod(dir_fd.as_raw_fd(), SECURE_RUNTIME_DIR_MODE)
-        .with_context(|| format!("Failed to set 0700 on {label}"))?;
 
     Ok(())
 }
@@ -530,7 +556,7 @@ fn verify_pam_integrity(pam_path: &Path) -> Result<()> {
             stat.st_mode
         ));
         return Err(anyhow::anyhow!(
-            "Security: {} is not a regular file",
+            "security check failed: {} is not a regular file",
             pam_path.display()
         ));
     }
