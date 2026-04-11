@@ -17,7 +17,7 @@ use crate::security;
 use anyhow::{Context, Result};
 use nix::sys::stat::{Mode, SFlag, fchmod, lstat};
 use nix::unistd::{Gid, Uid, fchown, getsid};
-use pam::Authenticator;
+use pam::{Client};
 use std::fs::{File, OpenOptions, create_dir, read_dir, remove_file};
 use std::io::{Read, Write as IoWrite, stdout};
 use std::os::fd::AsRawFd;
@@ -304,8 +304,8 @@ pub fn update_cache(cache_file: &Path) -> Result<()> {
 // ─── Private ────────────────────────────────────────────────────────────────
 
 fn do_pam_auth(username: &str, password: &str) -> Result<()> {
-    let mut pam = Authenticator::with_password(PAM_SERVICE).context("Failed to initialise PAM")?;
-    pam.get_handler().set_credentials(username, password);
+    let mut pam = Client::with_password(PAM_SERVICE).context("Failed to initialise PAM")?;
+    pam.conversation_mut().set_credentials(username, password);
     pam.authenticate()
         .context("PAM authentication failed — incorrect password")
 }

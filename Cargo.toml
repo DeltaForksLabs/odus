@@ -1,6 +1,6 @@
 [package]
 name    = "odus"
-version = "0.3.5"
+version = "0.3.6"
 edition = "2024"
 
 [dependencies]
@@ -15,7 +15,7 @@ anyhow = "1.0.102"
 # Leitura de senha sem echo no terminal
 rpassword = "7.4.0"
 # Autenticação PAM
-pam = "0.7"
+pam = "0.8"
 # Parsing de argumentos leve
 pico-args = "0.5"
 
