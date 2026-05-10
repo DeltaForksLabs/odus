@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 use nix::unistd::{Gid, Uid, execve, setgid, setgroups, setuid};
-use std::ffi::CString;
+use std::{fs, ffi::CString};
 use std::path::{Component, Path, PathBuf};
 use toml::Value;
 
@@ -142,8 +142,13 @@ fn resolve_command(cmd: &str, secure_paths: &[String]) -> Result<String> {
 
     for dir in secure_paths {
         let candidate = Path::new(dir).join(&bare_name);
-        if candidate.is_file() {
-            return Ok(candidate.to_string_lossy().into_owned());
+        // symlink_metadata (lstat) does NOT follow symlinks, unlike
+        // is_file() which resolves them — prevents symlink-based
+        // privilege escalation through secure_path entries.
+        if let Ok(meta) = fs::symlink_metadata(&candidate) {
+            if meta.is_file() && !meta.file_type().is_symlink() {
+                return Ok(candidate.to_string_lossy().into_owned());
+            }
         }
     }
 

@@ -10,8 +10,8 @@
 use anyhow::{Context, Result};
 use nix::sys::stat::{Mode, SFlag, fchmod, lstat};
 use nix::unistd::{Gid, Uid, fchown};
-use std::fs::OpenOptions;
-use std::io::Write as IoWrite;
+use std::fs;
+use std::io::{Read, Write as IoWrite};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
@@ -40,8 +40,16 @@ pub fn ensure_default_and_perms() -> Result<()> {
 
 /// Loads and parses /etc/odus.toml.
 pub fn load() -> Result<toml::Value> {
-    let config_str =
-        std::fs::read_to_string(config_path()).context("Failed to read /etc/odus.toml")?;
+    // Replaced read_to_string (follows symlinks) with O_NOFOLLOW-aware
+    // open to atomically reject symlinks at the open() syscall level.
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(config_path())
+        .context("Failed to open /etc/odus.toml")?;
+    let mut config_str = String::new();
+    file.read_to_string(&mut config_str)
+        .context("Failed to read /etc/odus.toml")?;
     // toml::from_str parses a full TOML document (comments, sections, etc).
     // .parse::<toml::Value>() uses Value::from_str which expects a bare TOML
     // value (string, 42, [...]) and rejects comments with 'unexpected content'.
@@ -117,7 +125,7 @@ fn create_if_missing(config_path: &Path) -> Result<()> {
     // O_CREAT|O_EXCL (create_new): fails atomically if the file already exists.
     // O_NOFOLLOW: rejects symlinks on the final path component.
     // Together these eliminate the TOCTOU window and symlink attack entirely.
-    match OpenOptions::new()
+    match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
