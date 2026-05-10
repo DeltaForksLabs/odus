@@ -137,4 +137,4 @@ You may choose either license when using, modifying, or distributing the project
 
 ## Credits
 
-Built by Paulo Daniel <paulodanielpro@proton.me> and <https://github.com/DeltaForksLabs>.
+Built by [Paulo Daniel](https://github.com/TrexPD) and [DeltaForks Labs](https://github.com/DeltaForksLabs).
