@@ -1,0 +1,15 @@
+#compdef odus
+
+setopt localoptions extended_glob
+
+_odus() {
+    local -a args
+    args=(
+        '(-)'{-h,--help}'[display help and exit]'
+        '(-)1: :_command_names -e'
+        '*:: :_normal'
+    )
+
+    _arguments -s -S $args
+}
+_odus "$@"

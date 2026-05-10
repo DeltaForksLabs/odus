@@ -1,6 +1,6 @@
 [package]
 name    = "odus"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 description = "A minimal privilege escalation tool for FreeBSD and Linux!"
 license = "MIT OR Apache-2.0"
