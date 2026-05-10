@@ -79,10 +79,14 @@ BINARY      := odus
 INSTALL_DIR := $(DESTDIR)/usr/local/bin
 TARGET      := target/release/$(BINARY)
 CONF_DIR    := /etc/odus.toml
+COMPL_BASE  := $(DESTDIR)/usr/local/share
+BASH_COMPL   := $(COMPL_BASE)/bash-completion/completions/$(BINARY)
+ZSH_COMPL    := $(COMPL_BASE)/zsh/site-functions/_$(BINARY)
+FISH_COMPL   := $(COMPL_BASE)/fish/vendor_completions.d/$(BINARY).fish
 
 # ─── Phony targets ───────────────────────────────────────────────────────────
 
-.PHONY: all build install uninstall clean check
+.PHONY: all build install uninstall clean check install-completions uninstall-completions
 
 all: build
 
@@ -111,6 +115,17 @@ install: build
 	@if [ ! -f /etc/odus.toml ]; then \
 		echo "[i] /etc/odus.toml not found — odus will create a default on first run."; \
 	fi
+	@echo "[*] Installing shell completions..."
+	@install -d "$(dir $(BASH_COMPL))" 2>/dev/null && \
+		install -m 0644 completions/odus.bash "$(BASH_COMPL)" && \
+		echo " ✓  bash → $(BASH_COMPL)"
+	@install -d "$(dir $(ZSH_COMPL))" 2>/dev/null && \
+		install -m 0644 completions/_odus "$(ZSH_COMPL)" && \
+		echo " ✓  zsh  → $(ZSH_COMPL)"
+	@install -d "$(dir $(FISH_COMPL))" 2>/dev/null && \
+		install -m 0644 completions/odus.fish "$(FISH_COMPL)" && \
+		echo " ✓  fish → $(FISH_COMPL)"
+	@echo "[✓] Installation complete."
 
 # ─── Uninstall ───────────────────────────────────────────────────────────────
 
@@ -133,6 +148,10 @@ uninstall:
 	else \
 		echo "[i] $(CONF_DIR) not found. Skipping."; \
 	fi
+	@echo "[*] Removing shell completions..."
+	@rm -f "$(BASH_COMPL)" 2>/dev/null && echo " ✓  Removed $(BASH_COMPL)" || true
+	@rm -f "$(ZSH_COMPL)"  2>/dev/null && echo " ✓  Removed $(ZSH_COMPL)" || true
+	@rm -f "$(FISH_COMPL)" 2>/dev/null && echo " ✓  Removed $(FISH_COMPL)" || true
 	@echo "[✓] Uninstallation complete."
 
 # ─── Clean ───────────────────────────────────────────────────────────────────
@@ -161,3 +180,33 @@ check:
 	fi
 	@$(CARGO) clippy -- -D warnings
 	@echo "[✓] All checks completed successfully."
+
+# ─── Shell completions ────────────────────────────────────────────────────────
+
+install-completions:
+	@if [ "$$(id -u)" -ne 0 ]; then \
+		echo "[!] Installing completions requires root. Run: sudo make install-completions"; \
+		exit 1; \
+	fi
+	@echo "[*] Installing shell completions..."
+	@install -d "$(dir $(BASH_COMPL))"; \
+		install -m 0644 completions/odus.bash "$(BASH_COMPL)"; \
+		echo " ✓  bash → $(BASH_COMPL)"
+	@install -d "$(dir $(ZSH_COMPL))"; \
+		install -m 0644 completions/_odus "$(ZSH_COMPL)"; \
+		echo " ✓  zsh  → $(ZSH_COMPL)"
+	@install -d "$(dir $(FISH_COMPL))"; \
+		install -m 0644 completions/odus.fish "$(FISH_COMPL)"; \
+		echo " ✓  fish → $(FISH_COMPL)"
+	@echo "[✓] Shell completions installed."
+
+uninstall-completions:
+	@if [ "$$(id -u)" -ne 0 ]; then \
+		echo "[!] Removing completions requires root. Run: sudo make uninstall-completions"; \
+		exit 1; \
+	fi
+	@echo "[*] Removing shell completions..."
+	@rm -f "$(BASH_COMPL)" 2>/dev/null && echo " ✓  Removed $(BASH_COMPL)" || true
+	@rm -f "$(ZSH_COMPL)"  2>/dev/null && echo " ✓  Removed $(ZSH_COMPL)" || true
+	@rm -f "$(FISH_COMPL)" 2>/dev/null && echo " ✓  Removed $(FISH_COMPL)" || true
+	@echo "[✓] Shell completions removed."

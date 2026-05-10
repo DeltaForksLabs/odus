@@ -97,11 +97,6 @@ odus <command> [args...]
 ```
 
 ```bash
-odus apt update
-odus apt install nginx
-```
-OR
-```bash
 odus pkg update
 odus systemctl restart nginx
 odus --help
@@ -109,6 +104,7 @@ odus --help
 
 - `..` and `.` path segments are rejected.
 - Bare names (`sh`, `ls`) are resolved through `secure_path` directories.
+- Tab completion for bash, zsh, and fish is installed automatically with `make install`.
 
 ---
 
