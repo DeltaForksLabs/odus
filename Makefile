@@ -107,9 +107,7 @@ install: build
 	fi
 	@echo "[*] Installing $(BINARY) to $(INSTALL_DIR)..."
 	install -d "$(INSTALL_DIR)"
-	install -m 0755 "$(TARGET)" "$(INSTALL_DIR)/$(BINARY)"
-	chown root:root "$(INSTALL_DIR)/$(BINARY)"
-	chmod u+s "$(INSTALL_DIR)/$(BINARY)"
+	install -m 4755 -o root -g root "$(TARGET)" "$(INSTALL_DIR)/$(BINARY)"
 	@echo "[✓] Installed: $(INSTALL_DIR)/$(BINARY)"
 	@ls -lha "$(INSTALL_DIR)/$(BINARY)"
 	@if [ ! -f /etc/odus.toml ]; then \
