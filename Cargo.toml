@@ -1,7 +1,13 @@
 [package]
 name    = "odus"
-version = "0.3.7"
+version = "0.4.0"
 edition = "2024"
+description = "A minimal privilege escalation tool for FreeBSD and Linux!"
+license = "MIT OR Apache-2.0"
+authors = ["Paulo Daniel <paulodanielpro@proton.me>"]
+repository = "https://github.com/DeltaForksLabs/odus"
+keywords = ["odus", "sudo", "user"]
+readme = "README.md"
 
 [dependencies]
 # Parsing do odus.toml
