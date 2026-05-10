@@ -72,7 +72,9 @@ pub fn log_security(detail: &str) {
 
 fn syslog(level: libc::c_int, msg: &str) {
     // Replace NUL bytes so the message is never silently truncated at the C layer.
-    let sanitized = msg.replace('\0', "?");
+    let sanitized = msg
+        .replace('\0', "?")
+        .replace(|c: char| c.is_control() && c != ' ', "?");
 
     let (Ok(msg_c), Ok(fmt_c)) = (CString::new(sanitized), CString::new("%s")) else {
         return; // unreachable after NUL replacement, but handle gracefully

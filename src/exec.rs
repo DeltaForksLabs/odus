@@ -9,8 +9,8 @@
 
 use anyhow::{Context, Result};
 use nix::unistd::{Gid, Uid, execve, setgid, setgroups, setuid};
-use std::{fs, ffi::CString};
 use std::path::{Component, Path, PathBuf};
+use std::{ffi::CString, fs};
 use toml::Value;
 
 /// Resolves and validates the executable path before policy evaluation.

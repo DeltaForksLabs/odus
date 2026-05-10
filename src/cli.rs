@@ -39,8 +39,11 @@ pub fn parse() -> Result<Args> {
 
     let command: Vec<String> = remaining
         .into_iter()
-        .map(|s| s.into_string().unwrap_or_default())
-        .collect();
+        .map(|s| {
+            s.into_string()
+                .map_err(|_| anyhow::anyhow!("Argument contains invalid UTF-8"))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(Args { command })
 }
